@@ -1,0 +1,948 @@
+---
+title: "An Ensemble Model to Predict Whether a News Article is Fake or Real"
+author: "Meseret Ambachew"
+date: "Spring 2025"
+subtitle: "DA5030"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+---
+
+# **Introduction: Business Objective**
+
+In today's fragmented and fast-moving media landscape, misinformation spreads rapidly — often faster than the truth. For **public relations firms**, **media outlets**, and **brand managers**, the stakes are high: one fake news article can damage reputations, distort public narratives, and erode trust. As a result, being able to quickly and reliably distinguish between real and fake news isn’t just a technical challenge — it's a business imperative.
+
+This project aims to build a predictive model that classifies news articles as *Real* or *Fake* based on a range of data and content features, in other words variables. From a business perspective, such a model has immediate applications: 
+- it could power real-time content verification tools, strengthen media monitoring services, and serve as a safeguard in brand reputation systems. 
+- PR firms could use it to proactively flag misleading stories before they go viral, while media companies might integrate it into editorial pipelines or audience trust platforms.
+
+This project can help identify the signals and behaviors that tend to correlate with misinformation — such as clickbait tendencies, extreme sentiment, or questionable sources. By surfacing these insights, businesses are better equipped to understand and manage the risks posed by false narratives in the public sphere.
+
+Ultimately, this model isn’t just about prediction — it’s about giving communicators the tools to respond faster, protect their credibility, and make smarter decisions in a world where all information is nuanced.
+
+## **Data Interpretation**
+
+The dataset contains a mix of textual, categorical, and numerical variables, with a total of 24 features. Several variables — such as *state, source, political_bias,* and *fact_check_rating* are **categorical,** and have been transformed using encoding techniques like frequency encoding and one-hot encoding to prepare them for modeling. The target variable, *label,* is binary, classifying articles as either Real (1) or Fake (0).
+
+## **Methodology**
+
+This project will use four different supervised learning models:
+
+  - **Logistic Regression:** As a baseline, it offers interpretability and works well for binary classification, especially when variables are independent and linearly separable
+  - **k-Nearest Neighbors (kNN):** Chosen for its simplicity and effectiveness on structured data, especially after normalization
+  - **CART Decision Tree:** A rule-based model that captures non-linear relationships and is easy to visualize and interpret
+  - **Naive Bayes:** Well-suited for binary text classification problems due to its probabilistic structure and speed, especially when feature independence is assumed.
+
+These models were then combined into an ensemble, using stacking and weighted averaging to boost overall accuracy and reduce bias. This multi-model approach improves robustness by balancing the strengths of individual algorithms.
+
+*** 
+
+# **Data Analysis and Prep**
+
+## Load Library
+
+```{r, echo = F, LoadLibrary}
+# Below I'm loading the libraries that have functions I'll use and will potentially use
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(class)
+library(knitr)
+library(gmodels)
+library(e1071)
+library(psych)
+library(stats)
+library(C50)
+library(rpart)
+library(rpart.plot)
+library(stringr)
+library(randomForest)
+library(glmnet)
+library(klaR)
+library(xgboost)
+library(tidyr)
+library(tibble)
+```
+
+
+## Load Data
+
+The data is loaded from a public Google Drive csv.
+
+```{r, LoadData}
+
+# ChatGPT helped me write the correct URL from google drive https://chatgpt.com/c/67fd5ff8-7194-8004-8c4e-b4c4d96337a4
+
+url <- "https://drive.google.com/uc?export=download&id=1f6pPuWv9PuaYgFn4mwL9GV421SHLCE-e"
+
+fake.news.df <- read.csv(url,
+                     header = T,
+                     stringsAsFactors = F)
+
+summary(fake.news.df)
+str(fake.news.df)
+```
+
+## Inspect Missing Values
+
+```{r, DataInspection}
+
+# The below is a loop to inspect missing values for each variable
+cols <- colnames(fake.news.df)
+
+# missing values in each column: iterate
+for (c in cols) {
+  missing.rows <- which(is.na(fake.news.df[,c]))
+  
+  num.missing <- length(missing.rows)
+  
+  s <- "no"
+  
+  if (num.missing > 0)
+    s <- num.missing
+  
+  print(paste0("Column '", c, "' has ", 
+                 s, " missing values"))}
+```
+
+The data has no missing values. Also from the statistical summary there isn't a huge range between the mean and median, so I will not inspect for outliers and remove them. I'm already using four different models for my ensemble and wouldn't want it to overfit, so I'll continue the next step in my data prep.
+
+
+## Remove Unnecessary Variables
+
+For this model, there is no plan to forecast fake news article as the purpose of this model is to accurately predict news as "real" or "fake", so I will drop the *date_published* variable as it won't be necessary. I'll also drop the *"text"* variable as the data reads the same text across 4,000 columns and so does *"title"*.
+
+I'm also dropping the *"author"* variable since some are filled with pseudonyms (John Doe, Jane Doe). Author is also too predictable of an identifier if they are notorious for providing fake or real news. Regardless, we only need one unique identifier for this model which is **id** so we'll keep for tracking.
+
+```{r, RemoveVariables}
+# Using the piping method from the 'dplyr' package I'm going to remove the variables date_published, author, text, and title
+
+cleaned_fakenews_df <- fake.news.df %>%
+  dplyr::select(-date_published, -title, -text, -author)
+
+head(cleaned_fakenews_df)
+```
+
+
+## Variable Encoding: Categorical Variables
+
+For the categorical variables that have over 5 levels, I'll use *frequency encoding* to measure how common real or fake news is among those categories. Those categories or variables are *state*, *source*, and *category (sports, entertainment, etc...)*
+
+Since there are only three levels for *political_bias*, *fact_check_rating*, and the target variable, *label*, I'll use one-hot encoding for it to be clearly identifiable. It's also recommended for the models I'm incorporating (Logistic Regression, kNN)
+
+```{r, CategoricalLevels}
+
+# Using sapply I called only the categorical variables in my data to give me a summary on their lengths
+
+sapply(cleaned_fakenews_df[sapply(cleaned_fakenews_df, function(x) is.character(x) 
+                                  || is.factor(x))],function(x) nlevels(as.factor(x)))
+
+```
+
+
+### Frequency Encoding
+
+Below, a loop is used to use frequency encoding for the *state*, *source*, and *category* variables.
+
+```{r, FreqEncoding}
+
+vars_to_encode <- c("state", "source", "category")
+
+# Loop created below to apply frequency encoding to each variable listed above
+
+for (var in vars_to_encode) {
+  freq_map <- cleaned_fakenews_df %>%
+    group_by(.data[[var]]) %>%
+    summarise(Frequency = n(), .groups = 'drop') %>%
+    mutate(Frequency = Frequency / nrow(cleaned_fakenews_df))  # Relative frequency
+
+  freq_map <- setNames(freq_map$Frequency, freq_map[[var]])
+
+# Replace original column with encoded frequency values
+  cleaned_fakenews_df[[var]] <- unname(freq_map[as.character(cleaned_fakenews_df[[var]])])
+}
+
+head(cleaned_fakenews_df)
+```
+
+
+### One-Hot Encoding
+
+Using the piping method, categorical variables like target *label*, and other variables *political_bias* and *fact_check_rating* were encoded numerically to make them compatible with machine learning algorithms. This step ensures the models can interpret these variables as inputs during training and prediction.
+
+```{r, OneHotEncoding}
+
+# 'label' encoding
+cleaned_fakenews_df <- cleaned_fakenews_df %>%
+  mutate(label = ifelse(label == "Real", 1, 0)) # using the ifelse() argument to mark "Real" as 1 and "Fake" as 0.
+
+# 'political_bias' encoding
+cleaned_fakenews_df <- cleaned_fakenews_df %>%
+  mutate(political_bias = ifelse(political_bias == "Left", 0,
+                          ifelse(political_bias == "Center", 1, 2)))
+
+# 'fact_check_rating' encoding
+cleaned_fakenews_df <- cleaned_fakenews_df %>%
+  mutate(fact_check_rating = ifelse(fact_check_rating == "FALSE", 0,
+                             ifelse(fact_check_rating == "Mixed", 1, 2)))
+
+head(cleaned_fakenews_df)
+
+```
+
+
+## Normalize Variables with Continuous Data
+
+I applied **z-score normalization** to all continuous variables. This transformation standardizes each variable to have a mean of 0 and standard deviation of 1, helping distance-based models like kNN and logistic regression perform more effectively without being biased toward larger numerical ranges.
+
+```{r, NormalizeData}
+
+cont_vars <- c( # Created a concatanate of all the variables with continuous data
+  "sentiment_score",
+  "word_count",
+  "char_count",
+  "readability_score",
+  "num_shares",
+  "num_comments",
+  "trust_score",
+  "clickbait_score",
+  "plagiarism_score")
+
+zNormalize <- function(v) { # Applied them to the function written below
+  m <- mean(v)
+  s <- sd(v)
+  return((v - m) / s)}
+
+# Created a new dataframe with the new data
+cleaned_fakenews_df_2 <- cleaned_fakenews_df %>%
+  mutate(across(all_of(cont_vars), zNormalize))
+
+```
+
+
+## Feature Engineering
+
+To improve model performance, I created four new features that combine existing numeric variables to capture deeper patterns:
+
+ - **credibility_clickbait_gap** measures the difference between *trustworthiness* and *clickbait*, flagging potentially misleading content.
+ - **engagement_total** sums *shares* and *comments* to reflect how viral a news article is.
+ - **content_density** captures writing style by comparing *character* and *word counts.*
+ - **readability_vs_sentiment** combines *tone* and *readability* to detect emotionally persuasive content.
+
+These engineered features aim to add predictive value and reduce noise, especially for models like logistic regression.
+
+```{r, FeatureEngineering}
+
+cleaned_fakenews_df_2 <- cleaned_fakenews_df_2 %>%
+  mutate(
+    credibility_clickbait_gap = trust_score - clickbait_score,
+    engagement_total = num_shares + num_comments,
+    content_density = char_count / (word_count + 1),  # adding 1 to avoid divide by zero
+    readability_vs_sentiment = readability_score * sentiment_score)
+
+```
+
+
+## Examine Multicollinearity
+
+To evaluate multicollinearity among features, I generated a correlation matrix heatmap using all numeric variables in the dataset. The heatmap shows a strong red diagonal, indicating perfect correlation of each variable with itself, which is expected.
+
+```{r, Correlation}
+
+numeric_vars <- cleaned_fakenews_df_2 %>% dplyr::select(where(is.numeric))
+
+# Compute correlation matrix using cor()
+cor_matrix <- cor(numeric_vars, use = "complete.obs")
+
+cor_df <- as.data.frame(cor_matrix) %>%
+  rownames_to_column(var = "Var1") %>%
+  pivot_longer(-Var1, names_to = "Var2", values_to = "Correlation")
+
+# Using ggplot and geom_tile I created a correlation matrix to display it
+cor_map <- ggplot(cor_df, aes(x = Var1, y = Var2, fill = Correlation)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(
+    low = "blue", high = "red", mid = "white",# assigning colors to range in correlation
+    midpoint = 0, limit = c(-1, 1), space = "Lab",
+    name = "Correlation"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_fixed() +
+  labs(title = "Correlation Matrix Heatmap")
+
+cor_map
+
+```
+
+- There is **no need to remove or combine** variables based on correlation.
+- The current feature set is appropriate for use in both linear models (e.g., logistic regression) and non-linear models (e.g., decision trees, ensemble methods).
+
+The rest of the variables in the dataset came numerically as counts, continuous data, or are categorized as binaries (0-1). Meaning this is ready for the next step of this process, **Building the Model**
+
+
+### **NOTE**
+Outliers were checked for this dataset with standard deviations of 3 and 1.5, this decreased the amount of data in my dataset heavily with little to no data to build a model with.
+
+***
+
+# **Model Building**
+
+For this project to help predict whether a news article is “Real” or “Fake," I’ve selected a diverse set of models that offer a balance of interpretability, simplicity, and predictive power:
+
+ - **Logistic Regression:** Useful for identifying linear relationships between content features (e.g., trust score, sentiment) and the article’s label
+ - **kNN (k-Nearest Neighbor):** Helps detect patterns based on proximity in feature space, especially after normalization
+ - **Decision Tree (CART):** Helps reveal decision paths and thresholds (e.g., trust score < 50 → likely fake). Overfitting is compensated by using an *80/20* train-test split and depth tuning.
+ - **Naive Bayes:** Used to see how well it can predict fake news using structured data like scores and categories. It’s a good way to test whether a simple model can still perform well.
+ 
+To evaluate the performance of each model, I used two key metrics:
+
+  - **Confusion Matrix:** This table compares the predicted labels against the actual labels from the validation set. It helps quantify how many articles were correctly or incorrectly classified as Real or Fake. From this matrix, I can calculate accuracy, precision, and recall.
+  - **F1 Score:** This is the harmonic mean of precision and recall. It’s especially useful for imbalanced datasets, where one    class might be more frequent than the other. A high F1 score means the model is doing well at not only catching fake news (recall) but also avoiding false alarms (precision).
+
+By calculating both the confusion matrix and F1 score for each model, I can compare their performance in a more balanced and meaningful way than accuracy alone. This ensures I choose models that are not just accurate, but also reliable in real-world, high-stakes scenarios like news verification. 
+
+
+## Split Data
+
+I’m splitting the data into an *80/20* train-test split to ensure that the models are evaluated fairly. Training on one portion and validating on another helps prevent overfitting and gives a more accurate sense of how the model will perform on unseen data. This approach is a standard practice in machine learning to assess generalization.
+
+80/20 also needs to account for overfitting with the CART Decision Tree Model as the model will also be boosted or the nodes will be adjusted.
+
+```{r, SplitData}
+set.seed(123)  # For reproducibility
+
+# Create 80% sample indices
+indices <- sample(1:nrow(cleaned_fakenews_df_2), size = 0.8 * nrow(cleaned_fakenews_df_2))
+
+# Split the data
+train_set <- cleaned_fakenews_df_2[indices, ]
+val_set <- cleaned_fakenews_df_2[-indices, ]
+
+# verification it was split appropriately
+n_train <- nrow(train_set)
+n_val <- nrow(val_set)
+
+total_rows_check <- (n_train + n_val) == nrow(cleaned_fakenews_df_2)
+total_rows_check
+```
+
+
+## Logistic Regression
+
+Below I've built the initial logistic regression model
+
+```{r, LogisticRegression}
+# calling the "label" target and comparing it to the rest of the variables
+fake_log_model <- glm(label ~ ., data = train_set, family = binomial())
+```
+
+To reduce the number of predictors with low statistical significance, I applied stepwise regression using the *step()* function. This method creates an iteration that removes variables with high p-values, helping to simplify the model while maintaining predictive power. The goal is to retain only those features that meaningfully contribute to the model's ability to distinguish real from fake news.
+
+
+## Reduced Logistic Regression Model
+
+```{r, ReducedLogReg}
+# I asked ChatGPT how I can reduce the printout https://chatgpt.com/c/68001cee-3a7c-8004-85e5-f6af9a27813f
+reduced_model <- step(fake_log_model, direction = "backward", trace = 0)
+```
+
+
+### Reduced Regression Model Accuracy
+
+```{r, ReducedRegEval}
+# Using the 'caret' package, it gives an easy way to compute a confusion matrix and get metrics like accuracy, precision, recall, and F1 score all in one step with 'confusionMatrix()' function
+
+predicted_probabilities_redlog <- predict(reduced_model, newdata = val_set, type = "response")
+
+# Convert probabilities to class predictions (threshold = 0.5)
+predicted_classes_redlog <- ifelse(predicted_probabilities_redlog > 0.5, 1, 0)
+
+# Convert to factor for confusion matrix
+predicted_classes_redlog <- factor(predicted_classes_redlog, levels = c(0, 1))
+actual_classes_redlog <- factor(val_set$label, levels = c(0, 1))
+
+# confusion matrix
+conf_matrix_redlog <- confusionMatrix(predicted_classes_redlog, actual_classes_redlog)
+
+conf_matrix_redlog
+```
+
+
+### Logistic Regression Model Accuracy
+
+```{r, LRegressionEval}
+
+# Using the 'caret' package, it gives an easy way to compute a confusion matrix and get metrics like accuracy, precision, recall, and F1 score all in one step with 'confusionMatrix()' function
+
+predicted_probabilities_log <- predict(fake_log_model, newdata = val_set, type = "response")
+
+# Convert probabilities to class predictions (threshold = 0.5)
+predicted_classes_log <- ifelse(predicted_probabilities_log > 0.5, 1, 0)
+
+# Convert to factor for confusion matrix
+predicted_classes_log <- factor(predicted_classes_log, levels = c(0, 1))
+actual_classes_log <- factor(val_set$label, levels = c(0, 1))
+
+conf_matrix_log <- confusionMatrix(predicted_classes_log, actual_classes_log)
+
+conf_matrix_log
+
+```
+
+The *fake_log_model* (originally coded logistic regression model), is 1% more accurate than the reduced model created above. To avoid overfitting, I'll include the original linear regression model in my ensemble.
+
+This is good, becuase this means all the variables are important for my model.
+
+
+### Logistic Regression F1-Score
+
+```{r, LRF1}
+TP_Log <- conf_matrix_log$table[2, 2]
+FP_Log <- conf_matrix_log$table[1, 2]
+FN_Log <- conf_matrix_log$table[2, 1]
+
+# Calculate precision, recall, and F1
+precision_log <- TP_Log / (TP_Log + FP_Log)
+recall_log <- TP_Log / (TP_Log + FN_Log)
+
+f1_score_log <- 2 * (precision_log * recall_log) / (precision_log + recall_log)
+
+f1_score_log
+```
+
+
+The F1-Score printed above is fairly moderate, meaning it might make false predictions. Which means we will have to rely on the other models created.
+
+
+## Naive Bayes Model Build and Accuracy
+
+```{r, NaiveBayesModel}
+
+# Must be a factor for 'NaiveBayes' to work
+train_set$label <- as.factor(train_set$label)
+val_set$label <- as.factor(val_set$label)
+
+nb_model <- NaiveBayes(label ~ ., data = train_set)
+
+# ChatGPT instructed me to include "suppressWarnings()" Because a warning was printed across 800 rows
+nb_prediction <- suppressWarnings(
+  predict(nb_model, val_set[, -which(names(val_set) == "label")]))
+
+conf_matrix_nb <- table(nb_prediction$class, val_set$label)
+conf_matrix_nb
+
+```
+
+The Naive Bayes model predicted the "Real" vs. "Fake" labels with the following results:
+
+  - 400 articles were correctly predicted as Fake (True Negatives)
+  - 3 articles were correctly predicted as Real (True Positives)
+  - 394 Real articles were incorrectly predicted as Fake (False Negatives)
+  - 3 Fake articles were incorrectly predicted as Real (False Positives)
+
+This indicates that the model is heavily biased toward predicting articles as Fake, leading to a very high number of false negatives. While it correctly identifies most Fake articles, it struggles to accurately detect Real ones—suggesting poor balance and weak generalization across both classes.
+
+
+### Naive Bayes F1-Score
+
+```{r, NaiveBayesF1}
+
+cm_nb <- conf_matrix_nb
+
+TP_NB <- cm_nb[2, 2]
+FP_NB <- cm_nb[1, 2]
+FN_NB <- cm_nb[2, 1]
+
+# calculate recision and recall
+precision_nb <- TP_NB / (TP_NB + FP_NB)
+recall_nb <- TP_NB / (TP_NB + FN_NB)
+
+# F1 Score
+f1_score_nb <- 2 * (precision_nb * recall_nb) / (precision_nb + recall_nb)
+
+f1_score_nb
+
+```
+
+An F1 score of **0.0149** means the Naive Bayes model is almost entirely ineffective at distinguishing between real and fake news, likely misclassifying nearly all instances.
+
+
+## Decision Tree
+
+I tested two types of decision tree models to predict whether news articles are real or fake: CART and C5.0.
+
+  - **CART** is easy to understand and shows how decisions are made step by step. I tested the original version and then improved it by pruning to reduce overfitting.
+  - **C5.0** is a newer tree method that can perform better with more complex data. I ran both a regular version and a boosted version with multiple trials to see if accuracy would improve.
+
+In total, I compared four tree models:
+
+  - **Regular CART**
+  - **Pruned CART**
+  - **C5.0**
+  - **Boosted C5.0**
+
+The best one of the four was added to my ensemble.
+
+
+### CART Decision Tree Model
+
+```{r, CARTModel}
+fake_cart_model <- rpart(label ~ ., data = train_set, method = "class", parms = list(split = "gini"))
+
+# Plot the tree
+fake_cart_plot <- rpart.plot(fake_cart_model)
+fake_cart_plot
+```
+
+
+### CART Decision Tree Accuracy
+
+```{r, CARTAccuracy}
+# Predict on validation set
+cart_predictions <- predict(fake_cart_model, val_set, type = "class")
+
+# Align factor levels
+common_levels <- union(levels(val_set$label), levels(cart_predictions))
+cart_predictions <- factor(cart_predictions, levels = common_levels)
+val_set$label <- factor(val_set$label, levels = common_levels)
+
+# Create confusion matrix
+conf_matrix_cart <- confusionMatrix(cart_predictions, val_set$label)
+conf_matrix_table <- table(cart_predictions, val_set$label)
+
+conf_matrix_cart
+
+```
+
+
+### CART Pruning
+
+```{r, CARTPruning}
+full_cart_model <- rpart(label ~ ., data = train_set, method = "class")
+
+# Plot cross-validation error to find optimal CP
+plotcp(full_cart_model)
+printcp(full_cart_model)
+
+# Identify optimal CP value (lowest cross-validated error)
+optimal_cp <- full_cart_model$cptable[which.min(full_cart_model$cptable[, "xerror"]), "CP"]
+
+# Prune the tree
+pruned_cart_model <- prune(full_cart_model, cp = optimal_cp)
+
+# Plot the pruned tree
+rpart.plot(pruned_cart_model)
+
+# Predict using both models
+original_cart_preds <- predict(full_cart_model, val_set, type = "class")
+pruned_cart_preds <- predict(pruned_cart_model, val_set, type = "class")
+
+# Align factor levels
+all_levels <- union(levels(val_set$label), unique(c(levels(original_cart_preds), levels(pruned_cart_preds))))
+original_cart_preds <- factor(original_cart_preds, levels = all_levels)
+pruned_cart_preds <- factor(pruned_cart_preds, levels = all_levels)
+val_set$label <- factor(val_set$label, levels = all_levels)
+
+# Confusion matrices
+original_cart_cm <- confusionMatrix(original_cart_preds, val_set$label)
+pruned_cart_cm <- confusionMatrix(pruned_cart_preds, val_set$label)
+
+# Print both
+original_cart_cm
+pruned_cart_cm
+```
+
+Because CART Decision Tree isn't strong enough, lets try the C5 model...
+
+
+### C5 Model and Accuracy
+
+```{r, C5Model}
+train_set$label <- as.factor(train_set$label)
+
+# Build the C5.0 model without boosting (trials = 1)
+c50_model_no_boost <- C5.0(x = train_set[, -which(names(train_set) == "label")],
+                           y = train_set$label,
+                           trials = 1)
+
+# Print summary
+c50_model_no_boost
+
+c50_pred <- predict(c50_model_no_boost, val_set[, -which(colnames(val_set) == "label")])
+
+# Align factor levels
+c50_pred <- factor(c50_pred, levels = levels(factor(val_set$label)))
+val_set$label <- factor(val_set$label, levels = levels(c50_pred))
+
+# Confusion matrix
+c50_conf_matrix <- confusionMatrix(c50_pred, val_set$label)
+
+# View results
+c50_conf_matrix
+```
+
+
+### Boosted C5 and Accuracy
+
+```{r, BoostedC5}
+c50_model_boost_10 <- C5.0(x = train_set[, -which(colnames(train_set) == "label")],
+                           y = train_set$label,
+                           trials = 50)
+
+# Predict on validation set
+c50_pred_boost_10 <- predict(c50_model_boost_10, val_set[, -which(colnames(val_set) == "label")])
+
+# Align factor levels
+c50_pred_boost_10 <- factor(c50_pred_boost_10, levels = levels(factor(val_set$label)))
+val_set$label <- factor(val_set$label, levels = levels(c50_pred_boost_10))
+
+# Confusion matrix
+c50_conf_matrix_boost_10 <- confusionMatrix(c50_pred_boost_10, val_set$label)
+c50_conf_matrix_boost_10
+```
+
+
+### CART Decision Tree F1 Score
+
+```{r, CARTF1}
+TP_CART <- conf_matrix_table["1", "1"]  
+TN_CART <- conf_matrix_table["0", "0"]  
+FP_CART <- conf_matrix_table["1", "0"]  
+FN_CART <- conf_matrix_table["0", "1"]  
+
+# Calculate Precision, Recall, and F1 Score
+precision_CART <- TP_CART / (TP_CART + FP_CART)
+recall_CART <- TP_CART / (TP_CART + FN_CART)
+f1_score_CART <- 2 * (precision_CART * recall_CART) / (precision_CART + recall_CART)
+
+f1_score_CART
+```
+
+A score of **0.447** suggests that the model struggles with misclassifications—either it's generating a lot of false positives, false negatives, or both.
+
+Out of all four decision tree models tested, the **regular CART** model performed slightly better in terms of accuracy and F1-score. While pruning helped reduce complexity, it also slightly reduced performance. Similarly, the C5.0 models. Both regular and boosted did not outperform the original CART. This suggests that, for this dataset, a simpler, unpruned CART model was more effective at capturing the patterns needed to distinguish real vs. fake news.
+
+
+## kNN Model
+
+To build the kNN model, I first ensured that the target variable label was treated as a factor. I then removed any irrelevant identifiers *(id)* to avoid bias in the distance calculations. Using 5-fold cross-validation, I trained the model with different odd-numbered k values from 1 to 19. The plot below shows how accuracy varied with each k, helping identify the most effective number of neighbors. This approach allowed me to tune k and avoid underfitting or overfitting, selecting the value that gave the highest validation accuracy.
+
+
+### Build Model
+
+```{r, BuildkNN}
+train_set$label <- factor(train_set$label, levels = c(0, 1))
+val_set$label <- factor(val_set$label, levels = c(0, 1))
+
+# Optional: drop ID column if you have one (e.g., article_id or similar)
+train_knn <- train_set %>% dplyr::select(-id)  # Replace `id` with actual ID col name if needed
+val_knn <- val_set %>% dplyr::select(-id)
+
+# 5-fold cross-validation setup
+train_control <- trainControl(method = "cv", number = 5)
+
+# Tune k from 1 to 19 (odd numbers)
+knn_model <- train(
+  label ~ ., 
+  data = train_knn,
+  method = "knn", 
+  trControl = train_control,
+  tuneGrid = expand.grid(k = seq(1, 19, by = 2))  # Try odd k-values only
+)
+
+# View results
+knn_model
+
+# Plot accuracy vs. k where it displays the best k value
+ggplot(knn_model$results, aes(x = k, y = Accuracy)) +
+  geom_line(color = "blue", size = 1) +
+  geom_point(color = "red", size = 2) +
+  ggtitle("kNN Accuracy vs. k Value") +
+  xlab("k (Number of Neighbors)") +
+  ylab("Accuracy") +
+  theme_minimal()
+```
+
+
+### kNN Accuracy
+
+```{r, kNN Accuracy}
+best_k <- knn_model$bestTune$k
+
+# Prepare data
+train_features <- train_knn %>% dplyr::select(-label)
+val_features <- val_knn %>% dplyr::select(-label)
+train_labels <- train_knn$label
+val_labels <- val_knn$label
+
+# Run kNN with best k
+knn_predictions <- knn(
+  train = train_features,
+  test = val_features,
+  cl = train_labels,
+  k = best_k)
+
+# Convert predictions and true labels to factor with same levels
+knn_predictions <- factor(knn_predictions, levels = levels(val_labels))
+val_labels <- factor(val_labels, levels = levels(knn_predictions))
+
+conf_matrix_kNN <- confusionMatrix(knn_predictions, val_labels)
+conf_matrix_kNN
+```
+
+
+### kNN F1-Score
+
+```{r, kNNF1}
+TP_KNN <- conf_matrix_kNN$table[2, 2]
+FP_KNN <- conf_matrix_kNN$table[2, 1]
+FN_KNN <- conf_matrix_kNN$table[1, 2]
+
+precision_KNN <- TP_KNN / (TP_KNN + FP_KNN)
+
+recall_KNN <- TP_KNN / (TP_KNN + FN_KNN)
+
+# F1-Score
+f1_score_KNN <- 2 * (precision_KNN * recall_KNN) / (precision_KNN + recall_KNN)
+
+f1_score_KNN
+```
+
+A score of **0.463** suggests that the model struggles with misclassifications—either it's generating a lot of false positives, false negatives, or both.
+
+
+## Ensemble Model
+
+To improve overall prediction accuracy, I created an ensemble model by averaging the predicted probabilities from three of my strongest individual models:
+
+  - Logistic Regression
+  - CART Decision Tree
+  - k-Nearest Neighbors (kNN)
+
+To take this further, I built a **weighted ensemble,** applying greater influence to higher-performing models. 
+
+Finally, I compared both of these ensembles against two advanced methods:
+
+  - **Stacked Ensemble:** A meta-decision tree learns how to combine predictions from individual models.
+  - **XGBoost Ensemble:** A gradient-boosted framework that improves accuracy by assigning higher weight to misclassified instances in earlier rounds.
+
+
+### Build Ensemble and Evaluate Accuracy
+
+```{r, BuildEnsemble}
+# Logistic Regression probabilities
+predicted_prob_logit <- predict(fake_log_model, newdata = val_set, type = "response")
+
+# CART probabilities
+predicted_prob_cart <- predict(fake_cart_model, newdata = val_set, type = "prob")[,2]
+
+# kNN: Convert predicted classes to 1s and 0s since it's not a probabilistic model
+knn_binary_preds <- as.numeric(as.character(knn_predictions))
+
+# Convert all predictions to numeric
+predicted_prob_logit <- as.numeric(predicted_prob_logit)
+predicted_prob_cart <- as.numeric(predicted_prob_cart)
+
+# Average probabilities across all four models
+ensemble_probabilities <- (predicted_prob_logit + #nb_pred_probs 
+                             + predicted_prob_cart + knn_binary_preds) / 4
+
+ensemble_predictions <- ifelse(ensemble_probabilities > 0.5, 1, 0)
+ensemble_predictions <- factor(ensemble_predictions, levels = levels(val_set$label))
+
+ensemble_conf_matrix <- confusionMatrix(ensemble_predictions, val_set$label)
+ensemble_conf_matrix
+```
+
+
+### Ensemble F1 Score
+
+```{r, EnsembleF1}
+
+TP_ENSEMBLE <- ensemble_conf_matrix$table[2, 2]
+FP_ENSEMBLE <- ensemble_conf_matrix$table[2, 1]
+FN_ENSEMBLE <- ensemble_conf_matrix$table[1, 2]
+
+precision_ENSEMBLE <- TP_ENSEMBLE / (TP_ENSEMBLE + FP_ENSEMBLE)
+recall_ENSEMBLE <- TP_ENSEMBLE / (TP_ENSEMBLE + FN_ENSEMBLE)
+
+f1_score_ENSEMBLE <- 2 * (precision_ENSEMBLE * recall_ENSEMBLE) / (precision_ENSEMBLE + recall_ENSEMBLE)
+
+f1_score_ENSEMBLE
+```
+
+A score of **0.334** suggests that the model struggles with misclassifications—either it's generating a lot of false positives, false negatives, or both.
+
+
+### Weighted Ensemble
+
+```{r, Weighted Ensemble}
+ensemble_probabilities_weighted <- ( # Applying more weights to the best performing model of the three
+  .5 * predicted_prob_logit +
+  .3 * predicted_prob_cart +
+  .1 * knn_binary_preds)
+
+ensemble_preds_weighted <- ifelse(ensemble_probabilities_weighted > 0.5, 1, 0)
+ensemble_preds_weighted <- factor(ensemble_preds_weighted, levels = levels(val_set$label))
+
+conf_matrix_weighted <- confusionMatrix(ensemble_preds_weighted, val_set$label)
+conf_matrix_weighted
+```
+
+
+### Stacking Boost Ensemble Build and Accuracy
+
+```{r, StackingBoost}
+
+# Including all the predicted values from each model in a dataframe
+stacking_data <- data.frame(
+  logit = predicted_prob_logit,
+  cart  = predicted_prob_cart,
+  knn   = knn_binary_preds,
+  label = val_set$label)
+
+# Boosting by predicting again the stacked model and using the rpart()
+stacked_tree_model <- rpart(label ~ ., data = stacking_data, method = "class")
+stacked_tree_preds <- predict(stacked_tree_model, type = "class")
+stacked_weighted_conf <- confusionMatrix(stacked_tree_preds, stacking_data$label)
+stacked_weighted_conf
+```
+
+
+### Boost with XGBoost Ensemble
+
+```{r, XGBEnsembleTest}
+
+# Step 2: Prepare data for xgboost
+stacking_matrix <- as.matrix(stacking_data %>% dplyr::select(-label))
+stacking_label <- stacking_data$label
+
+stacking_label <- as.numeric(as.character(stacking_data$label))
+
+xgb_ensemble <- xgboost(
+  data = stacking_matrix,
+  label = stacking_label,
+  nrounds = 150,
+  objective = "binary:logistic",
+  eval_metric = "error",
+  verbose = 0)
+
+# Step 4: Predict
+ensemble_boost_probs <- predict(xgb_ensemble, stacking_matrix)
+ensemble_boost_preds <- ifelse(ensemble_boost_probs > 0.5, 1, 0)
+ensemble_boost_preds <- factor(ensemble_boost_preds, levels = levels(val_set$label))
+val_set$label <- factor(val_set$label, levels = levels(ensemble_boost_preds))
+
+confusionMatrix(ensemble_boost_preds, val_set$label)
+
+```
+
+**EUREKA!!!**
+
+We have our most accurate model above using the XGBoost method, now we can evaluate our model and test it against the validation dataset.
+
+***
+
+# **Final Model Evaluation**
+
+## XGBOOST Ensemble Model F1 Score
+
+```{r, StackedEnsembleF1}
+
+xgb_conf_matrix <- confusionMatrix(ensemble_boost_preds, val_set$label)
+
+TP_xgb <- xgb_conf_matrix$table[2, 2]
+FP_xgb <- xgb_conf_matrix$table[2, 1]
+FN_xgb <- xgb_conf_matrix$table[1, 2]
+
+precision_xgb <- TP_xgb / (TP_xgb + FP_xgb)
+recall_xgb <- TP_xgb / (TP_xgb + FN_xgb)
+f1_score_xgb <- 2 * (precision_xgb * recall_xgb) / (precision_xgb + recall_xgb)
+
+f1_score_xgb
+```
+
+An F1 score of **0.90** for the XGBoost ensemble model indicates it performs very accurately performance. It can correctly identify both real and fake articles with very few classification errors.
+
+
+## Ensemble vs. Individual Models
+
+We'll compare our individual models created the the final XGBoost Model
+
+```{r, EnsemblevsIndividual}
+
+model_comparison_df <- data.frame(
+  Model = c("Logistic Regression", "Naive Bayes", "CART", "kNN", "XGBoost Ensemble"),
+  F1_Score = c(
+    round(f1_score_log, 3),
+    round(f1_score_nb, 3),
+    round(f1_score_CART, 3),
+    round(f1_score_KNN, 3),
+    round(f1_score_xgb, 3)))
+
+model_comparison_df
+```
+
+The results show that Naive Bayes performed poorly with an F1 score of just 0.015, indicating it struggled to make meaningful predictions. Logistic Regression (0.474), kNN (0.463), and CART (0.447) delivered moderate performance but still left room for improvement.
+
+The XGBoost Ensemble stood out with a significantly higher F1 score of **0.901,** confirming that combining multiple models with boosting leads to far better precision and recall in classifying fake vs. real news.
+
+
+## Predicted vs. Actual
+
+Below is a dataframe that's printable to compare the predicted results from the XGBoost Ensemble Model and the individual models to the actual result from the original dataframe.
+
+```{r, PredictedvsActual}
+
+comparison_df <- data.frame(
+  Actual_Label        = val_set$label,
+  Logistic_Prediction = predicted_classes_log,         
+  CART_Prediction     = cart_predictions,          
+  KNN_Prediction      = knn_predictions,        
+  NB_Prediction       = nb_prediction$class,        
+  XGBoost_Ensemble    = ensemble_boost_preds)
+
+# Add columns for correct/incorrect flags for each model
+comparison_df <- comparison_df %>%
+  mutate(
+    Correct_Logit     = Actual_Label == Logistic_Prediction,
+    Correct_CART      = Actual_Label == CART_Prediction,
+    Correct_KNN       = Actual_Label == KNN_Prediction,
+    Correct_NB        = Actual_Label == NB_Prediction,
+    Correct_XGBoost   = Actual_Label == XGBoost_Ensemble)
+
+head(comparison_df, 10)
+
+```
+
+***
+
+
+# **Deployment Plan**
+
+**Objective:**
+
+Deploy a high-performing XGBoost ensemble model that classifies news articles as Real or Fake to support real-time or batch prediction use cases for media companies, PR firms, or fact-checking platforms. Below are the steps to take from here...
+
+  - 1: Save the Trained Model
+  - 2: Create a Prediction Pipeline
+  - 3: Choose a Deployment Method
+  - 4: Model Monitoring & Maintenance
+
+***
+
+
+# **Conclusion**
+
+This project explored multiple classification algorithms to predict whether a news article is "Real" or "Fake," each selected for its unique strengths. I chose Logistic Regression for its interpretability, Decision Trees (CART and C5) for their ability to capture non-linear relationships, Naive Bayes for its simplicity and speed, and k-Nearest Neighbors for its proximity-based logic after normalization.
+
+To improve performance, I experimented with ensemble methods, starting with a weighted average of the top-performing models (Logistic, CART, kNN), and ultimately building a stacked model and an XGBoost-based ensemble. These combinations were selected to balance interpretability of the data, computational efficiency, and predictive power. The XGBoost ensemble significantly outperformed the individual models, demonstrating the power of boosting when applied to well-preprocessed features.
+
+Through this process, I gained a deeper understanding of what it takes to build an ideal classification model. Every model had trade-offs—some favored precision, others recall—reinforcing the “No Free Lunch” theorem, which reminds us there is no single best algorithm for every problem. The key is to build a diverse set of models, understand their assumptions, and thoughtfully combine their strengths for the best outcome.
+
+Ultimately, the best-performing solution was not a single algorithm, but a carefully tuned ensemble that synthesized insights from multiple perspectives—just like the real-world decisions it was designed to support.
+
