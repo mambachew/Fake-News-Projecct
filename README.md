@@ -1,4 +1,7 @@
 # Fake-News-Projecct
+
+[
+](https://creativecommons.org/licenses/by-sa/4.0/)
 This project focuses on building a machine learning model to classify news articles as either real or fake. The dataset includes metadata and content-related features, such as title, text, subject, and publication date. After preprocessing and feature engineering (e.g., removing null values, text cleaning, encoding categorical variables), I tested multiple classification algorithms including:
 
 - Logistic Regression
