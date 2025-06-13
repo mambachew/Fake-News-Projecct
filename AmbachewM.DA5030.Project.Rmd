@@ -1,8 +1,6 @@
 ---
 title: "An Ensemble Model to Predict Whether a News Article is Fake or Real"
 author: "Meseret Ambachew"
-date: "Spring 2025"
-subtitle: "DA5030"
 output:
   html_document:
     toc: true
